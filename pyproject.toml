@@ -1,0 +1,22 @@
+[project]
+name = "XiaoAiMusic"
+version = "1.0.0"
+description = "小爱音箱 播放本地音乐"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+
+[tool.uv]
+# Rebuild package when any rust files change 
+# https://github.com/PyO3/maturin/issues/2314#issuecomment-2488542771
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+]
