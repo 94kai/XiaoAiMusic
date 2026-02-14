@@ -4,11 +4,22 @@ MUSIC_CONFIG = {
         "/Users/xuekai/Downloads/t",
         "/Users/xuekai/Downloads/test",
     ],
+    # 支持索引的音频后缀（小写，带点）
+    "supported_audio_extensions": [
+        ".mp3",
+        ".flac",
+        ".wav",
+        ".m4a",
+        ".aac",
+        ".ogg",
+    ],
     "search": {
         # 返回结果上限（先全匹配，再截取前 N 首）
-        "max_results": 10,
-        # 曲库索引定时刷新间隔（秒）
-        "refresh_interval_sec": 300,
+        "max_results": 20,
+        # 曲库索引定时刷新间隔（秒）；设置为 0 表示禁用定时刷新
+        "refresh_interval_sec": 0,
+        # 索引文件保存路径（包含歌曲路径、歌名、歌手、专辑）
+        "index_file": ".cache/music_index.json",
     },
     "commands": {
         # 触发播放命令的前缀
@@ -22,14 +33,21 @@ MUSIC_CONFIG = {
             "闭嘴",
             "别放了",
             "不要放了",
+            "关机"
+        ],
+        # 触发曲库刷新的命令词（全量匹配，忽略空格）
+        "refresh_keywords": [
+            "刷新曲库",
+        ],
+        # 触发随机播放的命令词（全量匹配，忽略空格）
+        "random_play_keywords": [
+            "随便听听",
         ],
     },
     "http": {
-        # 本地 HTTP 服务监听地址
-        "host": "0.0.0.0",
         "port": 18080,
-        # 小爱设备可访问到的本机 IP（自动拼成 http://<ip>:<port>）
-        "device_ip": "192.168.11.18",
+        # 小爱可访问到的服务地址
+        "base_url": "http://192.168.11.18:18080",
     },
     "logging": {
         "level": "INFO",

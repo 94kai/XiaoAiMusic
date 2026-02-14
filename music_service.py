@@ -5,6 +5,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
+from urllib.parse import quote
 from urllib.parse import unquote
 from urllib.parse import urlparse
 
@@ -181,21 +182,15 @@ class LocalMusicHttpServer:
         with self._lock:
             self._allowed_files.add(file_path)
         encoded = self._encode_path(file_path)
-        filename = os.path.basename(file_path)
+        filename = quote(os.path.basename(file_path), safe="")
         return f"{self.base_url}/file/{encoded}/{filename}"
 
 
 def build_music_server(http_config: dict) -> LocalMusicHttpServer:
-    host = str(http_config.get("host", "0.0.0.0"))
     port = int(http_config.get("port", 18080))
-    base_url = str(http_config.get("public_base_url") or "").strip()
-
-    if not base_url:
-        device_ip = str(http_config.get("device_ip") or "").strip()
-        if device_ip:
-            base_url = f"http://{device_ip}:{port}"
+    base_url = str(http_config.get("base_url") or "").strip()
 
     if not base_url:
         base_url = f"http://{guess_local_ip()}:{port}"
 
-    return LocalMusicHttpServer(host=host, port=port, base_url=base_url)
+    return LocalMusicHttpServer(host="0.0.0.0", port=port, base_url=base_url)
