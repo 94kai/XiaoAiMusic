@@ -7,8 +7,7 @@
 感谢 [idootop/open-xiaoai](https://github.com/idootop/open-xiaoai) 项目。
 
 ## 功能
-
-<img width="1229" height="481" alt="image" src="https://github.com/user-attachments/assets/9facf069-0901-4037-9364-54159d25a0ba" />
+![img.png](img.png)
 
 - 曲库索引
   - 启动时自动为曲库建立索引
@@ -75,9 +74,45 @@ ffprobe -version
 uv run main.py
 ```
 
-## 后台运行与重启
+## PM2 后台运行（推荐）
 
-后台运行（推荐）：
+1. 安装 PM2（如未安装）：
+
+```bash
+npm i -g pm2
+```
+
+2. 启动：
+
+```bash
+mkdir -p logs
+pm2 start ecosystem.config.cjs
+```
+
+3. 查看状态和日志：
+
+```bash
+pm2 status
+pm2 logs XiaoAiMusic
+```
+
+4. 重启 / 停止：
+
+```bash
+pm2 restart XiaoAiMusic
+pm2 stop XiaoAiMusic
+```
+
+5. 开机自启（可选）：
+
+```bash
+pm2 save
+pm2 startup
+```
+
+## nohup 后台运行（免安装）
+
+后台运行：
 
 ```bash
 mkdir -p logs

@@ -19,7 +19,7 @@ MUSIC_CONFIG = {
         # 曲库索引定时刷新间隔（秒）；设置为 0 表示禁用定时刷新
         "refresh_interval_sec": 0,
         # 索引文件保存路径（包含歌曲路径、歌名、歌手、专辑）
-        "index_file": ".cache/music_index.json",
+        "index_file": "cache/music_index.json",
     },
     "commands": {
         # 触发播放命令的前缀
