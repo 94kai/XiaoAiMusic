@@ -104,6 +104,3 @@ kill "$(cat logs/app.pid)" 2>/dev/null || true
 nohup uv run main.py > logs/app.log 2>&1 &
 echo $! > logs/app.pid
 ```
-
-# TODO
-- [ ] 增量索引

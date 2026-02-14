@@ -67,8 +67,12 @@ class MusicIndexer:
         self.metadata_workers = max(1, int(metadata_workers or default_workers))
         self._metadata_extractor = MusicMetadataExtractor()
 
-    def build(self, music_dirs: list[str]) -> list[IndexedSong]:
-        candidates: list[tuple[str, str]] = []
+    def build(
+        self,
+        music_dirs: list[str],
+        previous_songs: list[IndexedSong] | None = None,
+    ) -> list[IndexedSong]:
+        candidates: list[tuple[str, str, int, int]] = []
         logger.info("开始刷新曲库索引: 目录=%s", music_dirs)
         for directory in music_dirs:
             directory = os.path.abspath(os.path.expanduser(directory))
@@ -81,19 +85,42 @@ class MusicIndexer:
                     if self.extensions and ext not in self.extensions:
                         continue
                     path = os.path.join(root, name)
-                    candidates.append((path, name))
+                    try:
+                        stat_result = os.stat(path)
+                    except Exception:
+                        continue
+                    candidates.append((path, name, int(stat_result.st_size), int(stat_result.st_mtime_ns)))
 
         if not candidates:
             logger.info("曲库索引刷新完成: 总数=0")
             return []
 
-        if self.metadata_workers <= 1:
-            songs = [self._build_indexed_song(item) for item in candidates]
+        previous_map = {item.path: item for item in (previous_songs or [])}
+        reused: list[IndexedSong] = []
+        pending: list[tuple[str, str, int, int]] = []
+        for item in candidates:
+            path, _, size, mtime_ns = item
+            prev = previous_map.get(path)
+            if prev and prev.size == size and prev.mtime_ns == mtime_ns:
+                reused.append(prev)
+            else:
+                pending.append(item)
+
+        if not pending:
+            songs = reused
+        elif self.metadata_workers <= 1:
+            songs = reused + [self._build_indexed_song(item) for item in pending]
         else:
             with ThreadPoolExecutor(max_workers=self.metadata_workers) as pool:
-                songs = list(pool.map(self._build_indexed_song, candidates))
+                songs = reused + list(pool.map(self._build_indexed_song, pending))
         songs.sort(key=lambda item: item.path)
-        logger.info("曲库索引刷新完成: 总数=%d 并行度=%d", len(songs), self.metadata_workers)
+        logger.info(
+            "曲库索引刷新完成: 总数=%d 复用=%d 更新=%d 并行度=%d",
+            len(songs),
+            len(reused),
+            len(pending),
+            self.metadata_workers,
+        )
         return songs
 
     def _safe_extract_metadata(self, file_path: str) -> SongMetadata:
@@ -102,8 +129,8 @@ class MusicIndexer:
         except Exception:
             return SongMetadata()
 
-    def _build_indexed_song(self, file_item: tuple[str, str]) -> IndexedSong:
-        path, name = file_item
+    def _build_indexed_song(self, file_item: tuple[str, str, int, int]) -> IndexedSong:
+        path, name, size, mtime_ns = file_item
         metadata = self._safe_extract_metadata(path)
         return IndexedSong(
             path=path,
@@ -111,4 +138,6 @@ class MusicIndexer:
             title_lower=metadata.title.lower(),
             artist_lower=metadata.artist.lower(),
             album_lower=metadata.album.lower(),
+            size=size,
+            mtime_ns=mtime_ns,
         )

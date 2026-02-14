@@ -59,7 +59,9 @@ class MusicSearcher:
             return len(self._songs)
 
     def refresh_index(self) -> int:
-        songs = self._indexer.build(self.music_dirs)
+        with self._lock:
+            previous = self._songs[:]
+        songs = self._indexer.build(self.music_dirs, previous_songs=previous)
         with self._lock:
             self._songs = songs
         self._store.save(songs)
@@ -71,11 +73,16 @@ class MusicSearcher:
             return []
         with self._lock:
             snapshot = self._songs[:]
-        selected = self._search_engine.search(snapshot, keyword_lower, self.max_results)
+        total_matches, selected = self._search_engine.search_with_count(
+            snapshot,
+            keyword_lower,
+            self.max_results,
+        )
         logger.info(
-            "内存搜索完成: 关键词=%s 总索引=%d 返回=%d 返回上限=%d",
+            "内存搜索完成: 关键词=%s 总索引=%d 总匹配=%d 返回=%d 返回上限=%d",
             keyword,
             len(snapshot),
+            total_matches,
             len(selected),
             self.max_results,
         )
