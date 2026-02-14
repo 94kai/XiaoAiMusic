@@ -9,6 +9,7 @@ import sys
 import time
 import wave
 from dataclasses import dataclass
+from typing import Any
 
 import open_xiaoai_server
 
@@ -62,6 +63,8 @@ async def on_event(event: str):
 
     header = line.get("header", {})
     payload = line.get("payload", {})
+    App.try_capture_reply_text(header=header, payload=payload, line=line)
+
     if (
         header.get("namespace") != "SpeechRecognizer"
         or header.get("name") != "RecognizeResult"
@@ -78,19 +81,23 @@ async def on_event(event: str):
     logger.info("ASR 最终文本: %s", text)
 
     if is_stop_play_command(text, App.stop_keywords):
+        App.disarm_reply_interrupt("收到停止命令")
         asyncio.create_task(App.stop_music())
         return
 
     if App._is_refresh_index_command(text):
+        App.arm_reply_interrupt("语音刷新")
         asyncio.create_task(App.refresh_music_index_and_reply("语音刷新"))
         return
 
     if App._is_random_play_command(text):
+        App.arm_reply_interrupt("语音随机播放")
         asyncio.create_task(App.play_random_music())
         return
 
     keyword = extract_play_keyword(text, App.play_keywords)
     if keyword:
+        App.arm_reply_interrupt(f"语音搜索播放:{keyword}")
         asyncio.create_task(App.play_local_music_by_keyword(keyword))
 
 
@@ -107,6 +114,12 @@ class App:
     timer_task: asyncio.Task | None = None
     index_refresh_task: asyncio.Task | None = None
     index_refresh_lock = asyncio.Lock()
+    last_reply_text: str = ""
+    reply_interrupt_armed = False
+    reply_interrupt_armed_at = 0.0
+    reply_interrupt_reason = ""
+    reply_interrupt_lock = asyncio.Lock()
+    reply_interrupt_last_stop_at = 0.0
 
     timer_buffer_sec = float(MUSIC_CONFIG.get("timer_buffer_sec", 1.5))
 
@@ -133,6 +146,8 @@ class App:
         for keyword in command_config.get("random_play_keywords", ["随便听听"])
         if normalize_keyword(keyword)
     }
+    reply_interrupt_timeout_sec = float(command_config.get("reply_interrupt_timeout_sec", 20))
+    reply_interrupt_cooldown_sec = float(command_config.get("reply_interrupt_cooldown_sec", 1.2))
 
     searcher = MusicSearcher(
         music_dirs=MUSIC_CONFIG.get("music_dirs", []) or [],
@@ -141,6 +156,134 @@ class App:
         index_file=search_index_file,
     )
     ffprobe_path = shutil.which("ffprobe")
+
+    @classmethod
+    def arm_reply_interrupt(cls, reason: str):
+        cls.reply_interrupt_armed = True
+        cls.reply_interrupt_armed_at = time.monotonic()
+        cls.reply_interrupt_reason = reason
+        logger.info("回复拦截窗口已开启: 原因=%s", reason)
+
+    @classmethod
+    def disarm_reply_interrupt(cls, reason: str):
+        if not cls.reply_interrupt_armed:
+            return
+        cls.reply_interrupt_armed = False
+        logger.info("回复拦截窗口已关闭: 原因=%s 触发=%s", cls.reply_interrupt_reason, reason)
+        cls.reply_interrupt_reason = ""
+
+    @classmethod
+    def _is_reply_interrupt_armed(cls) -> bool:
+        if not cls.reply_interrupt_armed:
+            return False
+        now = time.monotonic()
+        if now - cls.reply_interrupt_armed_at > cls.reply_interrupt_timeout_sec:
+            cls.disarm_reply_interrupt("超时")
+            return False
+        return True
+
+    @classmethod
+    def try_capture_reply_text(cls, header: dict[str, Any], payload: dict[str, Any], line: dict[str, Any]):
+        namespace = str(header.get("namespace") or "")
+        name = str(header.get("name") or "")
+        if namespace == "SpeechRecognizer" and name == "RecognizeResult":
+            return
+
+        texts: list[str] = []
+        for source in (payload, line):
+            texts.extend(cls._extract_candidate_texts(source))
+        unique_texts = [item for item in dict.fromkeys(texts) if item]
+        if not unique_texts:
+            return
+
+        namespace_lower = namespace.lower()
+        name_lower = name.lower()
+        maybe_reply_event = (
+            "tts" in namespace_lower
+            or "speechsynthesizer" in namespace_lower
+            or "nlp" in namespace_lower
+            or "dialog" in namespace_lower
+            or "assistant" in namespace_lower
+            or "reply" in name_lower
+            or "respond" in name_lower
+            or "speak" in name_lower
+        )
+        if not maybe_reply_event:
+            return
+
+        cls.last_reply_text = unique_texts[0]
+        logger.info(
+            "小爱回复捕获: namespace=%s name=%s text=%s",
+            namespace or "-",
+            name or "-",
+            cls.last_reply_text,
+        )
+        if cls._is_reply_interrupt_armed():
+            is_speak_event = "speechsynthesizer" in namespace_lower and "speak" in name_lower
+            if is_speak_event:
+                now = time.monotonic()
+                if now - cls.reply_interrupt_last_stop_at >= cls.reply_interrupt_cooldown_sec:
+                    cls.reply_interrupt_last_stop_at = now
+                    asyncio.create_task(cls._interrupt_reply_playback())
+
+    @classmethod
+    def _extract_candidate_texts(cls, value: Any) -> list[str]:
+        candidates: list[str] = []
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                candidates.append(text)
+            return candidates
+        if isinstance(value, list):
+            for item in value:
+                candidates.extend(cls._extract_candidate_texts(item))
+            return candidates
+        if isinstance(value, dict):
+            direct_keys = {
+                "text",
+                "reply",
+                "answer",
+                "content",
+                "tts",
+                "say",
+                "speech",
+                "nlp_reply",
+                "reply_text",
+                "display_text",
+            }
+            for key, item in value.items():
+                key_lower = str(key).lower()
+                if key_lower in direct_keys and isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        candidates.append(text)
+                if key_lower in {"payload", "data", "results", "result", "instruction", "directives", "cards"}:
+                    candidates.extend(cls._extract_candidate_texts(item))
+            return candidates
+        return candidates
+
+    @classmethod
+    async def _interrupt_reply_playback(cls):
+        async with cls.reply_interrupt_lock:
+            if not cls._is_reply_interrupt_armed():
+                return
+            logger.info("命中回复拦截窗口，立即停止小爱当前播报")
+            await stop_playback()
+
+    @classmethod
+    async def _speak_text(cls, text: str):
+        cls.disarm_reply_interrupt("即将发送播报")
+        return await speak_text(text)
+
+    @classmethod
+    async def _ask_xiaoai(cls, text: str):
+        cls.disarm_reply_interrupt("即将发送问答请求")
+        return await ask_xiaoai(text)
+
+    @classmethod
+    async def _play_music_url(cls, url: str):
+        cls.disarm_reply_interrupt("即将发送播放请求")
+        return await play_music_url(url)
 
     @staticmethod
     def _safe_read_command_line(prompt: str = ">>> ") -> str:
@@ -281,7 +424,7 @@ class App:
     @classmethod
     async def _start_song_unlocked(cls, song: SongItem, trigger: str):
         cls.current_song = song
-        result = await play_music_url(song.url)
+        result = await cls._play_music_url(song.url)
         logger.info(
             "开始播放: 来源=%s 第%d首 %s 时长=%.1f秒 剩余队列=%d 路径=%s",
             trigger,
@@ -343,14 +486,14 @@ class App:
     async def refresh_music_index_and_reply(cls, reason: str):
         try:
             if cls.index_refresh_lock.locked():
-                await speak_text("曲库正在刷新，请稍候")
+                await cls._speak_text("曲库正在刷新，请稍候")
                 return
-            await speak_text("正在刷新曲库，请稍候")
+            await cls._speak_text("正在刷新曲库，请稍候")
             total, cost_ms = await cls.refresh_music_index(reason)
-            await speak_text(f"曲库刷新完成，共{total}首，耗时{cost_ms / 1000:.1f}秒")
+            await cls._speak_text(f"曲库刷新完成，共{total}首，耗时{cost_ms / 1000:.1f}秒")
         except Exception as exc:
             logger.exception("曲库索引刷新失败: 原因=%s 错误=%s", reason, exc)
-            await speak_text("曲库刷新失败，请稍后重试")
+            await cls._speak_text("曲库刷新失败，请稍后重试")
 
     @classmethod
     async def run_index_refresh_loop(cls):
@@ -371,20 +514,20 @@ class App:
     @classmethod
     async def play_local_music_by_keyword(cls, keyword: str):
         if not cls.searcher.has_dirs():
-            await speak_text("本地音乐目录还没有配置")
+            await cls._speak_text("本地音乐目录还没有配置")
             return
 
         logger.info("收到搜索请求: 关键词=%s", keyword)
         files = await asyncio.to_thread(cls.searcher.find, keyword)
         count = len(files)
         if count == 0:
-            await speak_text(f"没有找到包含{keyword}的歌曲")
+            await cls._speak_text(f"没有找到包含{keyword}的歌曲")
             logger.info("未找到匹配歌曲: 关键词=%s", keyword)
             return
 
         songs = await asyncio.to_thread(cls._build_song_items, files, cls.music_server)
         if not songs:
-            await speak_text("没有可播放的歌曲，无法解析音频时长")
+            await cls._speak_text("没有可播放的歌曲，无法解析音频时长")
             logger.warning("搜索结果存在但无可播放歌曲: 关键词=%s", keyword)
             return
         cleared_count = await cls.clear_queue(stop_device=True)
@@ -395,7 +538,7 @@ class App:
             cleared_count,
         )
         cls._log_queue(songs)
-        await speak_text(f"好的，找到{count}首歌曲")
+        await cls._speak_text(f"好的，找到{count}首歌曲")
 
         async with cls.local_music_lock:
             cls.play_queue = songs
@@ -411,26 +554,26 @@ class App:
     @classmethod
     async def play_random_music(cls):
         if not cls.searcher.has_dirs():
-            await speak_text("本地音乐目录还没有配置")
+            await cls._speak_text("本地音乐目录还没有配置")
             return
 
         logger.info("收到随机播放请求")
         files = await asyncio.to_thread(cls.searcher.random_pick)
         count = len(files)
         if count == 0:
-            await speak_text("曲库为空，无法随机播放")
+            await cls._speak_text("曲库为空，无法随机播放")
             logger.info("随机播放失败: 曲库为空")
             return
 
         songs = await asyncio.to_thread(cls._build_song_items, files, cls.music_server)
         if not songs:
-            await speak_text("没有可播放的歌曲，无法解析音频时长")
+            await cls._speak_text("没有可播放的歌曲，无法解析音频时长")
             logger.warning("随机结果存在但无可播放歌曲")
             return
         cleared_count = await cls.clear_queue(stop_device=True)
         logger.info("随机选歌并替换队列: 命中=%d 清空旧队列=%d", count, cleared_count)
         cls._log_queue(songs)
-        await speak_text(f"好的，随机播放{count}首歌曲")
+        await cls._speak_text(f"好的，随机播放{count}首歌曲")
 
         async with cls.local_music_lock:
             cls.play_queue = songs
@@ -490,11 +633,11 @@ class App:
 
             content = " ".join(args[1:])
             if cmd == "say":
-                logger.info("[say] 返回=%s", await speak_text(content))
+                logger.info("[say] 返回=%s", await cls._speak_text(content))
             elif cmd == "ask":
-                logger.info("[ask] 返回=%s", await ask_xiaoai(content))
+                logger.info("[ask] 返回=%s", await cls._ask_xiaoai(content))
             elif cmd == "music":
-                logger.info("[music] 返回=%s", await play_music_url(content))
+                logger.info("[music] 返回=%s", await cls._play_music_url(content))
             elif cmd == "local":
                 await cls.play_local_music_by_keyword(content)
             else:
