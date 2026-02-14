@@ -29,3 +29,12 @@ uv run main.py
 - `search.refresh_interval_sec`：曲库索引刷新间隔（秒）
 - `commands.play_keywords` / `commands.stop_keywords`：语音命令关键词
 - `http.device_ip`：填写小爱设备可访问到的本机 IP（会自动拼接端口）
+
+## TODO
+- [ ] 随便听听（随机播放N首）
+- [ ] 搜索结果乱序播放
+- [ ] 优化搜索逻辑
+  - [ ] 模糊匹配
+  - [ ] 速度优化
+- [ ] ... ...
+
