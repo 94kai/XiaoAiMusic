@@ -7,6 +7,7 @@
 感谢 [idootop/open-xiaoai](https://github.com/idootop/open-xiaoai) 项目。
 
 ## 功能
+<img width="1229" height="481" alt="image" src="https://github.com/user-attachments/assets/9facf069-0901-4037-9364-54159d25a0ba" />
 
 - 启动时建立本地曲库内存索引，并按配置定时刷新
 - 识别到播放关键词（默认“播放xxx”）：在内存索引中做子串搜索并播放
