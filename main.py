@@ -79,6 +79,7 @@ async def on_event(event: str):
         return
 
     logger.info("ASR 最终文本: %s", text)
+    await App.handle_user_speech_interrupt(text)
 
     if is_stop_play_command(text, App.stop_keywords):
         App.disarm_reply_interrupt("收到停止命令")
@@ -120,6 +121,8 @@ class App:
     reply_interrupt_reason = ""
     reply_interrupt_lock = asyncio.Lock()
     reply_interrupt_last_stop_at = 0.0
+    whitelist_resume_task: asyncio.Task | None = None
+    whitelist_resume_seq = 0
 
     timer_buffer_sec = float(MUSIC_CONFIG.get("timer_buffer_sec", 1.5))
 
@@ -138,16 +141,22 @@ class App:
     stop_keywords = set(command_config.get("stop_keywords", []))
     refresh_keywords = {
         normalize_keyword(keyword).replace(" ", "")
-        for keyword in command_config.get("refresh_keywords", ["刷新曲库"])
+        for keyword in command_config.get("refresh_keywords", [])
         if normalize_keyword(keyword)
     }
     random_play_keywords = {
         normalize_keyword(keyword).replace(" ", "")
-        for keyword in command_config.get("random_play_keywords", ["随便听听"])
+        for keyword in command_config.get("random_play_keywords", [])
+        if normalize_keyword(keyword)
+    }
+    interrupt_whitelist_keywords = {
+        normalize_keyword(keyword).replace(" ", "")
+        for keyword in command_config.get("interrupt_whitelist_keywords", [])
         if normalize_keyword(keyword)
     }
     reply_interrupt_timeout_sec = float(command_config.get("reply_interrupt_timeout_sec", 20))
     reply_interrupt_cooldown_sec = float(command_config.get("reply_interrupt_cooldown_sec", 1.2))
+    auto_resume_delay_sec = float(command_config.get("auto_resume_delay_sec", 1.8))
 
     searcher = MusicSearcher(
         music_dirs=MUSIC_CONFIG.get("music_dirs", []) or [],
@@ -181,6 +190,34 @@ class App:
             cls.disarm_reply_interrupt("超时")
             return False
         return True
+
+    @classmethod
+    def _is_user_interrupt_whitelisted(cls, text: str) -> bool:
+        normalized = normalize_keyword(text).replace(" ", "")
+        return cls._matches_any_keyword(normalized, cls.interrupt_whitelist_keywords)
+
+    @classmethod
+    def _matches_any_keyword(cls, normalized_text: str, keywords: set[str]) -> bool:
+        if not normalized_text:
+            return False
+        for keyword in keywords:
+            if not keyword:
+                continue
+            if normalized_text == keyword or keyword in normalized_text:
+                return True
+        return False
+
+    @classmethod
+    async def handle_user_speech_interrupt(cls, text: str):
+        normalized = normalize_keyword(text).replace(" ", "")
+        if cls._is_user_interrupt_whitelisted(text):
+            cls.disarm_reply_interrupt("用户语音白名单命中")
+            logger.info("用户语音命中打断白名单，不清空队列: %s", text)
+            await cls._schedule_auto_resume_after_whitelist(normalized, text)
+            return
+        cleared_count = await cls.clear_queue(stop_device=True)
+        cls.disarm_reply_interrupt("用户语音打断")
+        logger.info("用户语音打断，已清空队列并停播: 文本=%s 清空数量=%d", text, cleared_count)
 
     @classmethod
     def try_capture_reply_text(cls, header: dict[str, Any], payload: dict[str, Any], line: dict[str, Any]):
@@ -284,6 +321,37 @@ class App:
     async def _play_music_url(cls, url: str):
         cls.disarm_reply_interrupt("即将发送播放请求")
         return await play_music_url(url)
+
+    @classmethod
+    async def _schedule_auto_resume_after_whitelist(cls, normalized_text: str, raw_text: str):
+        if cls.current_song is None:
+            return
+        cls.whitelist_resume_seq += 1
+        seq = cls.whitelist_resume_seq
+        if cls.whitelist_resume_task and not cls.whitelist_resume_task.done():
+            cls.whitelist_resume_task.cancel()
+        logger.info(
+            "白名单语音触发自动恢复计划: 文本=%s 延迟=%.1fs",
+            raw_text,
+            cls.auto_resume_delay_sec,
+        )
+        cls.whitelist_resume_task = asyncio.create_task(cls._auto_resume_after_whitelist(seq))
+
+    @classmethod
+    async def _auto_resume_after_whitelist(cls, seq: int):
+        try:
+            await asyncio.sleep(max(cls.auto_resume_delay_sec, 0.1))
+        except asyncio.CancelledError:
+            return
+        if seq != cls.whitelist_resume_seq:
+            return
+        async with cls.local_music_lock:
+            if cls.current_song is None:
+                return
+            song = cls.current_song
+            logger.info("执行白名单自动恢复播放: %s", song.name)
+            await cls._cancel_timer_unlocked()
+            await cls._start_song_unlocked(song, trigger="白名单自动恢复")
 
     @staticmethod
     def _safe_read_command_line(prompt: str = ">>> ") -> str:
